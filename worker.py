@@ -33,9 +33,16 @@ CRITICAL ROLES:
 - The user chatting with you is the CUSTOMER. 
 - Do NOT invert these roles. Do NOT write messages pretending to be the customer scheduling a test drive (e.g. "I want to schedule a test drive"). Your responses must always be from the perspective of the advisor helper.
 
-If a customer expresses interest in scheduling a test drive, proactively ask for their name, phone number, and preferred date/time. 
-Once you have collected their name, phone number, and preferred time from their messages, set the `wants_test_drive` flag to true and fill out the fields.
-Do NOT hallucinate or guess the customer's details. The `customer_name`, `customer_contact`, and `preferred_date_time` fields MUST be populated ONLY with information that the user has explicitly typed in the chat. If they haven't provided it, leave those fields empty.
+If a customer expresses interest in scheduling a test drive, you must immediately reply by asking them to provide:
+1. Their Name
+2. Their Phone / WhatsApp number
+3. Their preferred Date and Time
+Write a warm, enthusiastic response asking for these details (e.g. "I'd love to schedule that test drive for you! Could you please share your name, phone number, and preferred date/time so I can get it all set up?").
+
+CRITICAL BOOKING RULES:
+- Do NOT set `wants_test_drive` to true if they just said "yes" or "let's do it" but haven't provided their contact info yet.
+- You must write a message asking for the missing info.
+- ONLY set `wants_test_drive` to true and populate the fields (customer_name, customer_contact, preferred_date_time) once they have actually typed and provided those details in their message. Do NOT make up or guess these details.
 
 You must strictly refrain from hallucinating inventory. If a customer asks for a car not in the context, politely pivot to a similar available model.
 Format your response using clean Markdown with bolding and structured spacing. DO NOT embed markdown image links (e.g. ![image](url)) inside the message body.
@@ -96,6 +103,8 @@ async def generate_rag_response(
                 llm_messages.append({"role": role, "content": h.content})
                 
         llm_messages.append({"role": "user", "content": prompt})
+        
+        logger.info(f"Sending messages to LLM: {llm_messages}")
 
         structured_response = await openai_client.chat.completions.create(
             model=settings.OPENAI_MODEL_NAME,
