@@ -1,6 +1,7 @@
 import logging
 import httpx
 from pydantic import BaseModel, Field
+from typing import Optional
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 import instructor
@@ -13,16 +14,18 @@ embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
 logger = logging.getLogger(__name__)
 
-from typing import Optional
-
+# Pydantic Schema for frontend API responses
 class CarSalesResponse(BaseModel):
-    message_body: str = Field(description="Markdown text containing clean bolding and structured spacing.")
-    selected_image_url: str = Field(description="Must be empty or a direct URL fetched from the matched context payload.")
-    wants_test_drive: bool = Field(default=False, description="Set to true ONLY if the customer has explicitly agreed to a test drive AND provided their name, contact info, and preferred time.")
-    customer_name: Optional[str] = Field(default=None, description="The customer's name if provided.")
-    customer_contact: Optional[str] = Field(default=None, description="The customer's phone number or WhatsApp number if provided.")
-    preferred_date_time: Optional[str] = Field(default=None, description="The preferred date and time for the test drive.")
-    car_of_interest: Optional[str] = Field(default=None, description="The make and model of the car they want to test drive.")
+    message_body: str
+    selected_image_url: str
+
+# Pydantic Schema for Pass 2 Structured Extraction
+class LeadExtraction(BaseModel):
+    customer_name: Optional[str] = Field(None, description="The name of the customer")
+    customer_contact: Optional[str] = Field(None, description="A valid contact phone number or WhatsApp number")
+    preferred_vehicle: Optional[str] = Field(None, description="The vehicle they want to test drive")
+    preferred_date_time: Optional[str] = Field(None, description="The date and time they want to schedule for a test drive")
+    ready_for_booking: bool = Field(False, description="Set to True ONLY if the customer has explicitly agreed to a test drive AND provided their name and contact info. Otherwise False.")
 
 SYSTEM_INSTRUCTION = """
 You are an elite, highly persuasive automotive sales advisor for a premium car dealership.
@@ -31,13 +34,13 @@ Your goal is to enthusiastically assist customers, build rapport, highlight feat
 CRITICAL ROLES: 
 - You are the SALES ADVISOR. 
 - The user chatting with you is the CUSTOMER. 
-- Do NOT invert these roles. Do NOT write messages pretending to be the customer scheduling a test drive (e.g. "I want to schedule a test drive"). Your responses must always be from the perspective of the advisor helper.
+- Do NOT invert these roles. Do NOT write messages pretending to be the customer scheduling a test drive. Your responses must always be from the perspective of the advisor helper.
 
 CONVERSATION FLOW:
 1. First, answer the customer's question directly using the available inventory details. Highlight the car's best features, and sell it enthusiastically!
 2. If they are checking stock or asking general questions, pitch the car and end by asking if they would like to schedule a test drive.
-3. If (and ONLY if) the customer explicitly agrees to or asks for a test drive, warmly ask them to provide their Name, Phone number, and preferred Date and time so you can book it.
-4. ONLY set the `wants_test_drive` flag to true and populate the fields (customer_name, customer_contact, preferred_date_time) once they have actually typed and provided those details in their message. Do NOT make up or guess these details.
+3. If they agree to or ask for a test drive, warmly ask them to provide their Name, Phone number, and preferred Date and time so you can book it.
+4. Do NOT say things like "I've booked it for you" unless they have actually typed and provided their name, contact, and time in the conversation history. If any of those are missing, ask for the missing details.
 
 PRICE BUDGET FILTERING (CRITICAL):
 - Pay close attention to the customer's budget (e.g. "under 1 million", "below 3M").
@@ -51,10 +54,20 @@ UNAVAILABLE VEHICLES & PIVOTING (CRITICAL):
   2. Pivot to proposing the closest match we *do* have in stock based on the vehicle type (e.g. recommend our Honda CR-V EX-L SUV if they asked for a Mercedes GLE SUV, or recommend our Toyota Camry if they asked for a sedan).
   3. Never ignore their request or jump straight to pitching a car without first explaining that we do not have the vehicle they originally asked for.
 
-You must strictly refrain from hallucinating inventory. Format your response using clean Markdown with bolding and structured spacing. DO NOT embed markdown image links (e.g. ![image](url)) inside the message body.
-Be charismatic, warm, and conversational. Do not just list bullet points—sell the car! Always end by asking an engaging closing question (e.g. asking to schedule a test drive).
-If the matched car has an image_url, include it in the selected_image_url field. Otherwise, leave it empty.
-CRITICAL: You must generate EXACTLY ONE response. Do NOT attempt to output multiple tool calls, even if multiple cars match the query. Synthesize your answer into a single message.
+Respond in plain text. Format your response using clean Markdown with bolding and structured spacing. DO NOT embed markdown image links (e.g. ![image](url)) inside the message body.
+"""
+
+EXTRACTION_PROMPT = """
+Analyze the recent chat history between the customer and the salesperson.
+Extract the customer's contact details and booking intent into the required JSON structure.
+Fields:
+- customer_name: The customer's name (only if explicitly provided in the chat by the user).
+- customer_contact: A phone number, WhatsApp number, or contact info (only if explicitly provided by the user).
+- preferred_date_time: The date and time they want to schedule for a test drive (only if explicitly provided).
+- preferred_vehicle: The car they want to test drive.
+- ready_for_booking: Set to True ONLY if the customer has explicitly agreed to a test drive AND provided their name AND contact info. Otherwise, leave as False.
+
+If a detail has not been provided yet, leave it as null. Do NOT guess, assume, or hallucinate any details.
 """
 
 async def generate_rag_response(
@@ -64,7 +77,7 @@ async def generate_rag_response(
     history: list = None
 ) -> CarSalesResponse:
     """
-    Core RAG logic independent of the delivery channel.
+    Two-Pass Conversational Routing and RAG pipeline.
     """
     # Step 1: Smart RAG - Decide if we need to search Qdrant
     car_keywords = ["suzuki", "jimny", "toyota", "camry", "honda", "cr-v", "lexus", "bmw", "car", "suv", "sedan", "stock", "inventory", "budget", "price", "million", "ksh", "cost", "expensive", "cheapest", "buy", "sell"]
@@ -72,14 +85,13 @@ async def generate_rag_response(
     words = query_lower.split()
     
     needs_search = True
-    # If the query is very short and does not contain car keywords, it's a conversational follow-up (e.g. "yes", "sure", "no")
     if len(words) < 4:
         if not any(kw in query_lower for kw in car_keywords):
             needs_search = False
 
+    search_results = []
     if needs_search:
         logger.info(f"Performing vector search for query: {message_body}")
-        # Step 2: Embed the contextualized incoming message
         query_text = message_body
         if history and len(history) > 0:
             query_text = f"Previous context: {history[-1].content}\nUser Question: {message_body}"
@@ -87,7 +99,6 @@ async def generate_rag_response(
         embeddings = list(embedding_model.embed([query_text]))
         query_vector = embeddings[0].tolist()
 
-        # Step 3: Vector Search in Qdrant with status filter
         search_results = await qdrant_client.search(
             collection_name=settings.QDRANT_COLLECTION_NAME,
             query_vector=query_vector,
@@ -102,7 +113,6 @@ async def generate_rag_response(
             limit=3
         )
 
-        # Step 4: Context Injection
         context_parts = []
         for hit in search_results:
             context_parts.append(
@@ -112,80 +122,104 @@ async def generate_rag_response(
         context_string = "\n\n".join(context_parts) if context_parts else "No available inventory matches this query."
         prompt = f"Context (Available Inventory):\n{context_string}\n\nCustomer Message:\n{message_body}"
     else:
-        logger.info("Smart RAG: Skipping vector search and context injection for conversational follow-up.")
+        logger.info("Smart RAG: Skipping vector search and context injection.")
         prompt = message_body
 
-    try:
-        # Step 4: Guardrailed Output using Instructor with OpenAI
-        llm_messages = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
-        
-        if history:
-            for h in history:
-                role = "assistant" if h.role == "bot" else "user"
-                llm_messages.append({"role": role, "content": h.content})
-                
-        llm_messages.append({"role": "user", "content": prompt})
-        
-        logger.info(f"Sending messages to LLM: {llm_messages}")
+    # ==========================================
+    # PASS 1: Conversational Voice (Plain Text)
+    # ==========================================
+    llm_messages = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+    if history:
+        for h in history:
+            role = "assistant" if h.role == "bot" else "user"
+            llm_messages.append({"role": role, "content": h.content})
+    llm_messages.append({"role": "user", "content": prompt})
 
-        structured_response = await openai_client.chat.completions.create(
+    try:
+        # Use raw client for Pass 1 (completely natural voice, no schemas)
+        chat_completion = await openai_client.client.chat.completions.create(
             model=settings.OPENAI_MODEL_NAME,
-            response_model=CarSalesResponse,
             messages=llm_messages,
-            temperature=0.2,
-            max_retries=2
+            temperature=0.2
         )
-        
-        # Intercept Test Drive request
-        logger.info(f"LLM returned structured_response: {structured_response.model_dump()}")
-        if structured_response.wants_test_drive:
-            name = structured_response.customer_name
-            contact = structured_response.customer_contact
-            time_pref = structured_response.preferred_date_time
+        ai_response_text = chat_completion.choices[0].message.content
+        logger.info(f"Pass 1 Response: {ai_response_text}")
+    except Exception as e:
+        logger.error(f"Pass 1 generation error: {e}")
+        ai_response_text = "I'm sorry, I encountered an error while searching the inventory. Could you please rephrase your request?"
+
+    # DYNAMIC IMAGE RESOLUTION
+    selected_image_url = ""
+    lower_response = ai_response_text.lower()
+    if needs_search and search_results:
+        for hit in search_results:
+            make = hit.payload.get("metadata", {}).get("make", "").lower()
+            model = hit.payload.get("metadata", {}).get("model", "").lower()
+            if make in lower_response or model in lower_response:
+                selected_image_url = hit.payload.get("metadata", {}).get("image_url", "")
+                break
+
+    # ==========================================
+    # PASS 2: Silent Lead Parser (Structured Background)
+    # ==========================================
+    recent_history_msgs = []
+    if history:
+        for h in history[-2:]:
+            role = "assistant" if h.role == "bot" else "user"
+            recent_history_msgs.append(f"{role}: {h.content}")
+    recent_history_msgs.append(f"user: {message_body}")
+    recent_history_msgs.append(f"assistant: {ai_response_text}")
+    conversation_log = "\n".join(recent_history_msgs)
+
+    try:
+        # Extract silent leads using Pydantic format
+        raw_extraction = await openai_client.chat.completions.create(
+            model=settings.OPENAI_MODEL_NAME,
+            response_model=LeadExtraction,
+            messages=[
+                {"role": "system", "content": EXTRACTION_PROMPT},
+                {"role": "user", "content": f"Recent Conversation Log:\n{conversation_log}"}
+            ],
+            temperature=0.0
+        )
+        logger.info(f"Pass 2 Extraction: {raw_extraction.model_dump()}")
+
+        if raw_extraction.ready_for_booking:
+            name = raw_extraction.customer_name
+            contact = raw_extraction.customer_contact
+            time_pref = raw_extraction.preferred_date_time
             
-            # Programmatic verification: Check if name and contact are actually present in the user's messages
             user_messages = [h.content for h in history if h.role == "user"] if history else []
             user_messages.append(message_body)
             combined_user_input = " ".join(user_messages).lower()
             
             name_present = name and name.lower() in combined_user_input
             contact_present = contact and contact.lower() in combined_user_input
-            
-            # If the name or contact is missing from what the user actually typed, it's a hallucination
+
             if not name_present or not contact_present:
-                logger.warning(f"LLM triggered wants_test_drive prematurely or hallucinated details. Name present: {name_present}, Contact present: {contact_present}. Overriding to False.")
-                structured_response.wants_test_drive = False
-                structured_response.customer_name = None
-                structured_response.customer_contact = None
-                
-                # Rewrite message to ask for the details if the LLM prematurely output a success response
-                structured_response.message_body = "I'd love to schedule that test drive for you! Could you please share your name, phone number, and preferred date/time so I can get it all set up?"
+                logger.warning(f"Pass 2 verification check failed. Hallucinated Name: {name} (Present: {name_present}), Contact: {contact} (Present: {contact_present})")
             else:
                 from database import add_lead
                 add_lead(
                     customer_name=name,
                     customer_contact=contact,
-                    car_of_interest=structured_response.car_of_interest or "Unknown",
+                    car_of_interest=raw_extraction.preferred_vehicle or "Unknown",
                     preferred_date_time=time_pref or "Unknown"
                 )
-                logger.info("Lead successfully saved to CRM.")
+                logger.info("Lead successfully saved to CRM in Pass 2.")
                 
-                # Override the message body with a clean, professional, dynamic confirmation message
-                car = structured_response.car_of_interest or "the vehicle"
-                structured_response.message_body = (
-                    f"Perfect, **{name}**! I have successfully registered your test drive request for the **{car}** on **{time_pref}**.\n\n"
+                # Append beautiful formatting to response text programmatically
+                ai_response_text = (
+                    f"Perfect, **{name}**! I have successfully registered your test drive request for the **{raw_extraction.preferred_vehicle or 'vehicle'}** on **{time_pref or 'your requested time'}**.\n\n"
                     f"✅ *Our showroom team will contact you shortly at **{contact}** to confirm your appointment. We look forward to showing you the car!*"
                 )
-            
-        logger.info(f"LLM returned text: {structured_response.message_body}")
-        logger.info(f"LLM returned image URL: {structured_response.selected_image_url}")
-        return structured_response
     except Exception as e:
-        logger.error(f"LLM Generation Error: {e}")
-        return CarSalesResponse(
-            message_body="I'm sorry, I encountered an error while searching the inventory. Could you please rephrase your request?",
-            selected_image_url=""
-        )
+        logger.error(f"Pass 2 structured extraction error: {e}")
+
+    return CarSalesResponse(
+        message_body=ai_response_text,
+        selected_image_url=selected_image_url
+    )
 
 
 async def process_whatsapp_message(
