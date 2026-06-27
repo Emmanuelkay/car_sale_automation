@@ -1,0 +1,6 @@
+.env
+car_env/
+__pycache__/
+*.db
+local_qdrant_db/
+.DS_Store
