@@ -9,6 +9,9 @@ from fastembed import TextEmbedding
 
 from config import settings
 
+import re
+from pydantic import BaseModel, Field, field_validator
+
 # Initialize FastEmbed model globally
 embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
@@ -26,6 +29,22 @@ class LeadExtraction(BaseModel):
     preferred_vehicle: Optional[str] = Field(None, description="The vehicle they want to test drive")
     preferred_date_time: Optional[str] = Field(None, description="The date and time they want to schedule for a test drive")
     ready_for_booking: bool = Field(False, description="Set to True ONLY if the customer has explicitly agreed to a test drive AND provided their name and contact info. Otherwise False.")
+
+    @field_validator("customer_contact")
+    @classmethod
+    def validate_phone_number(cls, v: Optional[str]) -> Optional[str]:
+        if not v:
+            return None
+        
+        # Strip spaces, dashes, and parenthetical symbols
+        clean_num = re.sub(r"[\s\-\(\)]", "", v)
+        
+        # Kenyan context validation (supports 07..., 01..., or +254...)
+        # Rejects obvious emergency numbers, shortcodes, or too-short inputs
+        if len(clean_num) < 9 or clean_num in ["911", "999", "112"]:
+            raise ValueError("Invalid phone number format")
+            
+        return clean_num
 
 SYSTEM_INSTRUCTION = """
 You are an elite, highly persuasive automotive sales advisor for a premium car dealership.
@@ -69,7 +88,6 @@ Fields:
 
 If a detail has not been provided yet, leave it as null. Do NOT guess, assume, or hallucinate any details.
 """
-
 
 def needs_inventory_search(user_message: str, chat_history: list) -> bool:
     """
@@ -161,9 +179,80 @@ async def generate_rag_response(
         prompt = message_body
 
     # ==========================================
-    # PASS 1: Conversational Voice (Plain Text)
+    # PASS 1: Silent Lead Parser (Background Structured Extraction)
     # ==========================================
-    llm_messages = [{"role": "system", "content": SYSTEM_INSTRUCTION}]
+    recent_history_msgs = []
+    if history:
+        for h in history[-2:]:
+            role = "assistant" if h.role == "bot" else "user"
+            recent_history_msgs.append(f"{role}: {h.content}")
+    recent_history_msgs.append(f"user: {message_body}")
+    conversation_log = "\n".join(recent_history_msgs)
+
+    nudge_message = ""
+    lead_saved = False
+    name = None
+    contact = None
+    time_pref = None
+    vehicle = None
+
+    try:
+        # Extract silent leads using Pydantic format
+        raw_extraction = await openai_client.chat.completions.create(
+            model=settings.OPENAI_MODEL_NAME,
+            response_model=LeadExtraction,
+            messages=[
+                {"role": "system", "content": EXTRACTION_PROMPT},
+                {"role": "user", "content": f"Recent Conversation Log:\n{conversation_log}"}
+            ],
+            temperature=0.0
+        )
+        logger.info(f"Pass 1 Extraction Output: {raw_extraction.model_dump()}")
+
+        if raw_extraction.ready_for_booking:
+            name = raw_extraction.customer_name
+            contact = raw_extraction.customer_contact
+            time_pref = raw_extraction.preferred_date_time
+            vehicle = raw_extraction.preferred_vehicle
+            
+            # Programmatic verification: Check if name and contact are actually present in the user's messages
+            user_messages = [h.content for h in history if h.role == "user"] if history else []
+            user_messages.append(message_body)
+            combined_user_input = " ".join(user_messages).lower()
+            
+            name_present = name and name.lower() in combined_user_input
+            contact_present = contact and contact.lower() in combined_user_input
+
+            if not name_present or not contact_present:
+                logger.warning(f"Pass 1 verification check failed. Hallucinated Name: {name} (Present: {name_present}), Contact: {contact} (Present: {contact_present})")
+                nudge_message = "\n\nNote: Do NOT confirm booking. The user has not provided their name or contact info yet. Politely ask them for their details."
+            else:
+                from database import add_lead
+                add_lead(
+                    customer_name=name,
+                    customer_contact=contact,
+                    car_of_interest=vehicle or "Unknown",
+                    preferred_date_time=time_pref or "Unknown"
+                )
+                logger.info("Lead successfully saved to CRM in Pass 1.")
+                lead_saved = True
+                nudge_message = f"\n\nNote: The test drive has been successfully booked for {name} on {time_pref}. Warmly confirm the booking."
+    except Exception as e:
+        logger.error(f"Pass 1 structured extraction error: {e}")
+        # Detect Pydantic validation error or ValueError
+        err_msg = str(e).lower()
+        if "validation" in err_msg or "valueerror" in err_msg or "value_error" in err_msg or "phone number" in err_msg:
+            nudge_message = "\n\nNote: The customer tried to book but provided an invalid phone number. Politely ask them to provide a valid contact phone number so our team can confirm the booking."
+        else:
+            nudge_message = "\n\nNote: If the customer is trying to book, make sure to collect their name, phone number, and preferred date/time first."
+
+    # ==========================================
+    # PASS 2: Conversational Voice (Plain Text Response)
+    # ==========================================
+    # Inject the lead extraction status nudge into the conversational agent's instructions
+    custom_system_prompt = SYSTEM_INSTRUCTION + nudge_message
+
+    llm_messages = [{"role": "system", "content": custom_system_prompt}]
     if history:
         for h in history:
             role = "assistant" if h.role == "bot" else "user"
@@ -171,8 +260,7 @@ async def generate_rag_response(
     llm_messages.append({"role": "user", "content": prompt})
 
     try:
-        # Use raw client for Pass 1 (completely natural voice, no schemas)
-        # Added frequency and presence penalties to break repeating loops
+        # Use raw client for Pass 2 (natural voice)
         chat_completion = await openai_client.client.chat.completions.create(
             model=settings.OPENAI_MODEL_NAME,
             messages=llm_messages,
@@ -181,9 +269,9 @@ async def generate_rag_response(
             presence_penalty=0.6
         )
         ai_response_text = chat_completion.choices[0].message.content
-        logger.info(f"Pass 1 Response: {ai_response_text}")
+        logger.info(f"Pass 2 Response: {ai_response_text}")
     except Exception as e:
-        logger.error(f"Pass 1 generation error: {e}")
+        logger.error(f"Pass 2 generation error: {e}")
         ai_response_text = "I'm sorry, I encountered an error while searching the inventory. Could you please rephrase your request?"
 
     # DYNAMIC IMAGE RESOLUTION
@@ -197,62 +285,12 @@ async def generate_rag_response(
                 selected_image_url = hit.payload.get("metadata", {}).get("image_url", "")
                 break
 
-    # ==========================================
-    # PASS 2: Silent Lead Parser (Structured Background)
-    # ==========================================
-    recent_history_msgs = []
-    if history:
-        for h in history[-2:]:
-            role = "assistant" if h.role == "bot" else "user"
-            recent_history_msgs.append(f"{role}: {h.content}")
-    recent_history_msgs.append(f"user: {message_body}")
-    recent_history_msgs.append(f"assistant: {ai_response_text}")
-    conversation_log = "\n".join(recent_history_msgs)
-
-    try:
-        # Extract silent leads using Pydantic format
-        raw_extraction = await openai_client.chat.completions.create(
-            model=settings.OPENAI_MODEL_NAME,
-            response_model=LeadExtraction,
-            messages=[
-                {"role": "system", "content": EXTRACTION_PROMPT},
-                {"role": "user", "content": f"Recent Conversation Log:\n{conversation_log}"}
-            ],
-            temperature=0.0
+    # If lead was successfully saved, override with the perfect confirmation message
+    if lead_saved:
+        ai_response_text = (
+            f"Perfect, **{name}**! I have successfully registered your test drive request for the **{vehicle or 'vehicle'}** on **{time_pref or 'your requested time'}**.\n\n"
+            f"✅ *Our showroom team will contact you shortly at **{contact}** to confirm your appointment. We look forward to showing you the car!*"
         )
-        logger.info(f"Pass 2 Extraction: {raw_extraction.model_dump()}")
-
-        if raw_extraction.ready_for_booking:
-            name = raw_extraction.customer_name
-            contact = raw_extraction.customer_contact
-            time_pref = raw_extraction.preferred_date_time
-            
-            user_messages = [h.content for h in history if h.role == "user"] if history else []
-            user_messages.append(message_body)
-            combined_user_input = " ".join(user_messages).lower()
-            
-            name_present = name and name.lower() in combined_user_input
-            contact_present = contact and contact.lower() in combined_user_input
-
-            if not name_present or not contact_present:
-                logger.warning(f"Pass 2 verification check failed. Hallucinated Name: {name} (Present: {name_present}), Contact: {contact} (Present: {contact_present})")
-            else:
-                from database import add_lead
-                add_lead(
-                    customer_name=name,
-                    customer_contact=contact,
-                    car_of_interest=raw_extraction.preferred_vehicle or "Unknown",
-                    preferred_date_time=time_pref or "Unknown"
-                )
-                logger.info("Lead successfully saved to CRM in Pass 2.")
-                
-                # Append beautiful formatting to response text programmatically
-                ai_response_text = (
-                    f"Perfect, **{name}**! I have successfully registered your test drive request for the **{raw_extraction.preferred_vehicle or 'vehicle'}** on **{time_pref or 'your requested time'}**.\n\n"
-                    f"✅ *Our showroom team will contact you shortly at **{contact}** to confirm your appointment. We look forward to showing you the car!*"
-                )
-    except Exception as e:
-        logger.error(f"Pass 2 structured extraction error: {e}")
 
     return CarSalesResponse(
         message_body=ai_response_text,
