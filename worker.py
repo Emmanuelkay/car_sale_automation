@@ -110,24 +110,40 @@ async def generate_rag_response(
         )
         
         # Intercept Test Drive request
+        logger.info(f"LLM returned structured_response: {structured_response.model_dump()}")
         if structured_response.wants_test_drive:
-            # Server-side validation to prevent LLM hallucinating the trigger early
             name = structured_response.customer_name
             contact = structured_response.customer_contact
+            time_pref = structured_response.preferred_date_time
             
-            if not name or not contact or name.lower() == "unknown" or contact.lower() == "unknown":
-                logger.warning("LLM triggered wants_test_drive prematurely without contact info. Overriding to False.")
+            # Programmatic verification: Check if name and contact are actually present in the user's messages
+            user_messages = [h.content for h in history if h.role == "user"] if history else []
+            user_messages.append(message_body)
+            combined_user_input = " ".join(user_messages).lower()
+            
+            name_present = name and name.lower() in combined_user_input
+            contact_present = contact and contact.lower() in combined_user_input
+            
+            # If the name or contact is missing from what the user actually typed, it's a hallucination
+            if not name_present or not contact_present:
+                logger.warning(f"LLM triggered wants_test_drive prematurely or hallucinated details. Name present: {name_present}, Contact present: {contact_present}. Overriding to False.")
                 structured_response.wants_test_drive = False
+                structured_response.customer_name = None
+                structured_response.customer_contact = None
+                
+                # Rewrite message to ask for the details if the LLM prematurely output a success response
+                structured_response.message_body = "I'd love to schedule that test drive for you! Could you please share your name, phone number, and preferred date/time so I can get it all set up?"
             else:
                 from database import add_lead
                 add_lead(
                     customer_name=name,
                     customer_contact=contact,
                     car_of_interest=structured_response.car_of_interest or "Unknown",
-                    preferred_date_time=structured_response.preferred_date_time or "Unknown"
+                    preferred_date_time=time_pref or "Unknown"
                 )
                 logger.info("Lead successfully saved to CRM.")
-                structured_response.message_body += "\n\n✅ *Your test drive request has been successfully received! Our showroom team will contact you shortly to confirm your appointment.*"
+                if "received" not in structured_response.message_body.lower():
+                    structured_response.message_body += "\n\n✅ *Your test drive request has been successfully received! Our showroom team will contact you shortly to confirm your appointment.*"
             
         logger.info(f"LLM returned text: {structured_response.message_body}")
         logger.info(f"LLM returned image URL: {structured_response.selected_image_url}")
