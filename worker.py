@@ -61,38 +61,54 @@ async def generate_rag_response(
     """
     Core RAG logic independent of the delivery channel.
     """
-    # Step 1: Embed the contextualized incoming message
-    query_text = message_body
-    if history and len(history) > 0:
-        query_text = f"Previous context: {history[-1].content}\nUser Question: {message_body}"
-        
-    embeddings = list(embedding_model.embed([query_text]))
-    query_vector = embeddings[0].tolist()
-
-    # Step 2: Vector Search in Qdrant with status filter
-    search_results = await qdrant_client.search(
-        collection_name=settings.QDRANT_COLLECTION_NAME,
-        query_vector=query_vector,
-        query_filter=Filter(
-            must=[
-                FieldCondition(
-                    key="status",
-                    match=MatchValue(value="available")
-                )
-            ]
-        ),
-        limit=3
-    )
-
-    # Step 3: Context Injection
-    context_parts = []
-    for hit in search_results:
-        context_parts.append(
-            f"ID: {hit.id}\nDetails: {hit.payload.get('listing_details')}\nMetadata: {hit.payload.get('metadata')}"
-        )
+    # Step 1: Smart RAG - Decide if we need to search Qdrant
+    car_keywords = ["suzuki", "jimny", "toyota", "camry", "honda", "cr-v", "lexus", "bmw", "car", "suv", "sedan", "stock", "inventory", "budget", "price", "million", "ksh", "cost", "expensive", "cheapest", "buy", "sell"]
+    query_lower = message_body.lower()
+    words = query_lower.split()
     
-    context_string = "\n\n".join(context_parts) if context_parts else "No available inventory matches this query."
-    prompt = f"Context (Available Inventory):\n{context_string}\n\nCustomer Message:\n{message_body}"
+    needs_search = True
+    # If the query is very short and does not contain car keywords, it's a conversational follow-up (e.g. "yes", "sure", "no")
+    if len(words) < 4:
+        if not any(kw in query_lower for kw in car_keywords):
+            needs_search = False
+
+    if needs_search:
+        logger.info(f"Performing vector search for query: {message_body}")
+        # Step 2: Embed the contextualized incoming message
+        query_text = message_body
+        if history and len(history) > 0:
+            query_text = f"Previous context: {history[-1].content}\nUser Question: {message_body}"
+            
+        embeddings = list(embedding_model.embed([query_text]))
+        query_vector = embeddings[0].tolist()
+
+        # Step 3: Vector Search in Qdrant with status filter
+        search_results = await qdrant_client.search(
+            collection_name=settings.QDRANT_COLLECTION_NAME,
+            query_vector=query_vector,
+            query_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="status",
+                        match=MatchValue(value="available")
+                    )
+                ]
+            ),
+            limit=3
+        )
+
+        # Step 4: Context Injection
+        context_parts = []
+        for hit in search_results:
+            context_parts.append(
+                f"ID: {hit.id}\nDetails: {hit.payload.get('listing_details')}\nMetadata: {hit.payload.get('metadata')}"
+            )
+        
+        context_string = "\n\n".join(context_parts) if context_parts else "No available inventory matches this query."
+        prompt = f"Context (Available Inventory):\n{context_string}\n\nCustomer Message:\n{message_body}"
+    else:
+        logger.info("Smart RAG: Skipping vector search and context injection for conversational follow-up.")
+        prompt = message_body
 
     try:
         # Step 4: Guardrailed Output using Instructor with OpenAI
