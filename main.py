@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
         api_key=settings.OPENAI_API_KEY,
         http_client=http_client
     )
-    openai_client = instructor.from_openai(client)
+    openai_client = instructor.from_openai(client, mode=instructor.Mode.MD_JSON)
     
     yield
     
