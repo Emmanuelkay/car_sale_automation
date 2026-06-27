@@ -178,7 +178,7 @@ async def generate_rag_response(
         vehicle = raw_extraction.preferred_vehicle
 
         # If the LLM successfully parsed any lead details, flag it to skip RAG search
-        if name or contact or time_pref:
+        if name or contact or time_pref or vehicle:
             is_providing_lead_details = True
 
         if raw_extraction.ready_for_booking:
