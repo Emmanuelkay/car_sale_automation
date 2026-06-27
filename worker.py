@@ -70,6 +70,48 @@ Fields:
 If a detail has not been provided yet, leave it as null. Do NOT guess, assume, or hallucinate any details.
 """
 
+
+def needs_inventory_search(user_message: str, chat_history: list) -> bool:
+    """
+    Smart RAG Bypass: Returns True if we should query Qdrant for car data,
+    and False if the message is purely conversational/booking-related.
+    """
+    user_msg_clean = user_message.strip().lower()
+    word_count = len(user_msg_clean.split())
+    
+    # 1. Hard Explicit Keywords: Always trigger search if these are present
+    car_keywords = ["honda", "crv", "cr-v", "jimny", "camry", "suzuki", "toyota", "mercedes", "gle", "price", "cost", "under", "below", "cheapest", "expensive", "specs", "specification", "features", "details", "mileage"]
+    if any(keyword in user_msg_clean for keyword in car_keywords):
+        return True
+        
+    # 2. Hard Conversational Skips: If it's a short agreement word, skip immediately
+    booking_signals = ["yes", "sure", "okay", "ok", "fine", "sounds good", "let's do it", "tomorrow"]
+    if user_msg_clean in booking_signals or (word_count < 4 and any(b in user_msg_clean for b in booking_signals)):
+        return False
+
+    # 3. CONTEXT WINDOW CHECK (The Fix for "specs?"):
+    if word_count < 4:
+        # Get the AI's very last message
+        last_ai_message = ""
+        for message in reversed(chat_history):
+            role = message.role if hasattr(message, 'role') else message.get('role', '')
+            if role in ["assistant", "bot"]:
+                content = message.content if hasattr(message, 'content') else message.get('content', '')
+                last_ai_message = content.lower()
+                break
+        
+        # Follow-up specifications keywords
+        spec_triggers = ["spec", "specs", "specification", "specifications", "mileage", "color", "colour", "year", "engine", "details", "photo", "photos", "picture", "pictures", "image", "images"]
+        if any(trigger in user_msg_clean for trigger in spec_triggers):
+            return True
+            
+        # If the AI was just talking about a specific inventory car, keep the context alive
+        if any(car in last_ai_message for car in ["honda", "cr-v", "jimny", "camry"]):
+            return True
+
+    # Default fallback
+    return word_count >= 4
+
 async def generate_rag_response(
     message_body: str, 
     qdrant_client: AsyncQdrantClient, 
@@ -80,23 +122,7 @@ async def generate_rag_response(
     Two-Pass Conversational Routing and RAG pipeline.
     """
     # Step 1: Smart RAG - Decide if we need to search Qdrant
-    needs_search = True
-    query_lower = message_body.lower()
-    words = query_lower.split()
-    
-    # Simple booking responses and patterns that do NOT need database search
-    booking_responses = ["yes", "no", "sure", "ok", "yep", "nah", "okay", "correct", "lets do it", "lets schedule", "cancel", "stop", "confirm"]
-    
-    import re
-    is_simple_confirmation = query_lower in booking_responses or len(words) == 1 and query_lower.strip("?.!") in booking_responses
-    is_phone = bool(re.search(r'\d{6,}', query_lower))
-    
-    # We only skip search if it's a simple confirmation/phone and doesn't mention car terms
-    car_keywords = ["suzuki", "jimny", "toyota", "camry", "honda", "cr-v", "lexus", "bmw", "car", "suv", "sedan", "stock", "inventory", "price", "ksh", "cost", "under", "below", "cheapest", "expensive", "specs", "specification", "features", "details", "mileage", "color", "year"]
-    has_car_keywords = any(kw in query_lower for kw in car_keywords)
-    
-    if (is_simple_confirmation or is_phone) and not has_car_keywords:
-        needs_search = False
+    needs_search = needs_inventory_search(message_body, history or [])
 
     search_results = []
     if needs_search:
