@@ -142,8 +142,13 @@ async def generate_rag_response(
                     preferred_date_time=time_pref or "Unknown"
                 )
                 logger.info("Lead successfully saved to CRM.")
-                if "received" not in structured_response.message_body.lower():
-                    structured_response.message_body += "\n\n✅ *Your test drive request has been successfully received! Our showroom team will contact you shortly to confirm your appointment.*"
+                
+                # Override the message body with a clean, professional, dynamic confirmation message
+                car = structured_response.car_of_interest or "the vehicle"
+                structured_response.message_body = (
+                    f"Perfect, **{name}**! I have successfully registered your test drive request for the **{car}** on **{time_pref}**.\n\n"
+                    f"✅ *Our showroom team will contact you shortly at **{contact}** to confirm your appointment. We look forward to showing you the car!*"
+                )
             
         logger.info(f"LLM returned text: {structured_response.message_body}")
         logger.info(f"LLM returned image URL: {structured_response.selected_image_url}")
