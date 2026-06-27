@@ -172,10 +172,13 @@ async def generate_rag_response(
 
     try:
         # Use raw client for Pass 1 (completely natural voice, no schemas)
+        # Added frequency and presence penalties to break repeating loops
         chat_completion = await openai_client.client.chat.completions.create(
             model=settings.OPENAI_MODEL_NAME,
             messages=llm_messages,
-            temperature=0.2
+            temperature=0.3,
+            frequency_penalty=0.8,
+            presence_penalty=0.6
         )
         ai_response_text = chat_completion.choices[0].message.content
         logger.info(f"Pass 1 Response: {ai_response_text}")
