@@ -139,8 +139,110 @@ async def generate_rag_response(
     """
     Two-Pass Conversational Routing and RAG pipeline.
     """
-    # Step 1: Smart RAG - Decide if we need to search Qdrant
-    needs_search = needs_inventory_search(message_body, history or [])
+    # ==========================================
+    # PASS 1: Silent Lead Parser (Background Structured Extraction)
+    # ==========================================
+    # We construct the conversation history log for the parser
+    recent_history_msgs = []
+    if history:
+        for h in history[-2:]:
+            role = "assistant" if h.role == "bot" else "user"
+            recent_history_msgs.append(f"{role}: {h.content}")
+    recent_history_msgs.append(f"user: {message_body}")
+    conversation_log = "\n".join(recent_history_msgs)
+
+    nudge_message = ""
+    lead_saved = False
+    name = None
+    contact = None
+    time_pref = None
+    vehicle = None
+    is_providing_lead_details = False
+
+    try:
+        # Extract silent leads using Pydantic format
+        raw_extraction = await openai_client.chat.completions.create(
+            model=settings.OPENAI_MODEL_NAME,
+            response_model=LeadExtraction,
+            messages=[
+                {"role": "system", "content": EXTRACTION_PROMPT},
+                {"role": "user", "content": f"Recent Conversation Log:\n{conversation_log}"}
+            ],
+            temperature=0.0
+        )
+        logger.info(f"Pass 1 Extraction Output: {raw_extraction.model_dump()}")
+
+        name = raw_extraction.customer_name
+        contact = raw_extraction.customer_contact
+        time_pref = raw_extraction.preferred_date_time
+        vehicle = raw_extraction.preferred_vehicle
+
+        # If the LLM successfully parsed any lead details, flag it to skip RAG search
+        if name or contact or time_pref:
+            is_providing_lead_details = True
+
+        if raw_extraction.ready_for_booking:
+            # Programmatic verification: Check if name and contact are actually present in the user's messages
+            user_messages = [h.content for h in history if h.role == "user"] if history else []
+            user_messages.append(message_body)
+            combined_user_input = " ".join(user_messages).lower()
+            
+            name_present = name and name.lower() in combined_user_input
+            contact_present = contact and contact.lower() in combined_user_input
+
+            if not name_present or not contact_present:
+                logger.warning(f"Pass 1 verification check failed. Hallucinated Name: {name} (Present: {name_present}), Contact: {contact} (Present: {contact_present})")
+                nudge_message = "\n\nNote: Do NOT confirm booking. The user has not provided their name or contact info yet. Politely ask them for their details."
+            else:
+                # Programmatically resolve vehicle of interest if LLM hallucinated it (e.g. BMW)
+                user_and_bot_history = [h.content.lower() for h in history] if history else []
+                combined_history_text = " ".join(user_and_bot_history)
+                
+                resolved_vehicle = vehicle
+                # If the extracted vehicle is None or not in history, look it up in history
+                if not vehicle or vehicle.lower() not in combined_history_text:
+                    for car_key in ["camry", "toyota", "jimny", "suzuki", "cr-v", "crv", "honda"]:
+                        if car_key in combined_history_text:
+                            if "camry" in car_key or "toyota" in car_key:
+                                resolved_vehicle = "Toyota Camry SE"
+                                break
+                            elif "jimny" in car_key or "suzuki" in car_key:
+                                resolved_vehicle = "Suzuki Jimny"
+                                break
+                            elif "cr-v" in car_key or "crv" in car_key or "honda" in car_key:
+                                resolved_vehicle = "2021 Honda CR-V EX-L"
+                                break
+                vehicle = resolved_vehicle or "Unknown Vehicle"
+
+                from database import add_lead
+                add_lead(
+                    customer_name=name,
+                    customer_contact=contact,
+                    car_of_interest=vehicle,
+                    preferred_date_time=time_pref or "Unknown"
+                )
+                logger.info("Lead successfully saved to CRM in Pass 1.")
+                lead_saved = True
+                nudge_message = f"\n\nNote: The test drive has been successfully booked for {name} on {time_pref}. Warmly confirm the booking."
+    except Exception as e:
+        logger.error(f"Pass 1 structured extraction error: {e}")
+        # Detect Pydantic validation error or ValueError
+        err_msg = str(e).lower()
+        if "validation" in err_msg or "valueerror" in err_msg or "value_error" in err_msg or "phone number" in err_msg:
+            is_providing_lead_details = True  # Still skip RAG search since they tried to book
+            nudge_message = "\n\nNote: The customer tried to book but provided an invalid phone number. Politely ask them to provide a valid contact phone number so our team can confirm the booking."
+        else:
+            nudge_message = "\n\nNote: If the customer is trying to book, make sure to collect their name, phone number, and preferred date/time first."
+
+    # ==========================================
+    # Step 2: Smart RAG - Decide if we need to search Qdrant
+    # ==========================================
+    # If they are providing booking details, we NEVER run RAG search to avoid distraction
+    needs_search = True
+    if is_providing_lead_details:
+        needs_search = False
+    else:
+        needs_search = needs_inventory_search(message_body, history or [])
 
     search_results = []
     if needs_search:
@@ -177,74 +279,6 @@ async def generate_rag_response(
     else:
         logger.info("Smart RAG: Skipping vector search and context injection.")
         prompt = message_body
-
-    # ==========================================
-    # PASS 1: Silent Lead Parser (Background Structured Extraction)
-    # ==========================================
-    recent_history_msgs = []
-    if history:
-        for h in history[-2:]:
-            role = "assistant" if h.role == "bot" else "user"
-            recent_history_msgs.append(f"{role}: {h.content}")
-    recent_history_msgs.append(f"user: {message_body}")
-    conversation_log = "\n".join(recent_history_msgs)
-
-    nudge_message = ""
-    lead_saved = False
-    name = None
-    contact = None
-    time_pref = None
-    vehicle = None
-
-    try:
-        # Extract silent leads using Pydantic format
-        raw_extraction = await openai_client.chat.completions.create(
-            model=settings.OPENAI_MODEL_NAME,
-            response_model=LeadExtraction,
-            messages=[
-                {"role": "system", "content": EXTRACTION_PROMPT},
-                {"role": "user", "content": f"Recent Conversation Log:\n{conversation_log}"}
-            ],
-            temperature=0.0
-        )
-        logger.info(f"Pass 1 Extraction Output: {raw_extraction.model_dump()}")
-
-        if raw_extraction.ready_for_booking:
-            name = raw_extraction.customer_name
-            contact = raw_extraction.customer_contact
-            time_pref = raw_extraction.preferred_date_time
-            vehicle = raw_extraction.preferred_vehicle
-            
-            # Programmatic verification: Check if name and contact are actually present in the user's messages
-            user_messages = [h.content for h in history if h.role == "user"] if history else []
-            user_messages.append(message_body)
-            combined_user_input = " ".join(user_messages).lower()
-            
-            name_present = name and name.lower() in combined_user_input
-            contact_present = contact and contact.lower() in combined_user_input
-
-            if not name_present or not contact_present:
-                logger.warning(f"Pass 1 verification check failed. Hallucinated Name: {name} (Present: {name_present}), Contact: {contact} (Present: {contact_present})")
-                nudge_message = "\n\nNote: Do NOT confirm booking. The user has not provided their name or contact info yet. Politely ask them for their details."
-            else:
-                from database import add_lead
-                add_lead(
-                    customer_name=name,
-                    customer_contact=contact,
-                    car_of_interest=vehicle or "Unknown",
-                    preferred_date_time=time_pref or "Unknown"
-                )
-                logger.info("Lead successfully saved to CRM in Pass 1.")
-                lead_saved = True
-                nudge_message = f"\n\nNote: The test drive has been successfully booked for {name} on {time_pref}. Warmly confirm the booking."
-    except Exception as e:
-        logger.error(f"Pass 1 structured extraction error: {e}")
-        # Detect Pydantic validation error or ValueError
-        err_msg = str(e).lower()
-        if "validation" in err_msg or "valueerror" in err_msg or "value_error" in err_msg or "phone number" in err_msg:
-            nudge_message = "\n\nNote: The customer tried to book but provided an invalid phone number. Politely ask them to provide a valid contact phone number so our team can confirm the booking."
-        else:
-            nudge_message = "\n\nNote: If the customer is trying to book, make sure to collect their name, phone number, and preferred date/time first."
 
     # ==========================================
     # PASS 2: Conversational Voice (Plain Text Response)
@@ -291,6 +325,15 @@ async def generate_rag_response(
             f"Perfect, **{name}**! I have successfully registered your test drive request for the **{vehicle or 'vehicle'}** on **{time_pref or 'your requested time'}**.\n\n"
             f"✅ *Our showroom team will contact you shortly at **{contact}** to confirm your appointment. We look forward to showing you the car!*"
         )
+    else:
+        # Programmatic check to ensure the LLM never falsely confirms a booking if lead_saved is False
+        lower_response = ai_response_text.lower()
+        if any(word in lower_response for word in ["confirm", "book", "register", "success", "received"]):
+            if "phone number" in nudge_message.lower():
+                name_str = f" {name}" if name else ""
+                ai_response_text = f"Thanks{name_str}! I see your details, but the phone number provided is invalid. Could you please share a valid phone number so our team can reach out to confirm your test drive?"
+            else:
+                ai_response_text = "I'd love to schedule that test drive for you! Could you please share your name, phone number, and preferred date/time so I can get it all set up?"
 
     return CarSalesResponse(
         message_body=ai_response_text,
