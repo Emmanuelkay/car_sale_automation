@@ -25,13 +25,16 @@ async def ingest_data():
     vector_size = 384
     embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5") 
 
-    # Check if collection exists
-    if not await qdrant_client.collection_exists(collection_name=collection_name):
-        logger.info(f"Creating collection {collection_name}...")
-        await qdrant_client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
-        )
+    # Recreate collection to wipe old fake URL records
+    if await qdrant_client.collection_exists(collection_name=collection_name):
+        logger.info(f"Deleting old collection {collection_name}...")
+        await qdrant_client.delete_collection(collection_name=collection_name)
+        
+    logger.info(f"Creating collection {collection_name}...")
+    await qdrant_client.create_collection(
+        collection_name=collection_name,
+        vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+    )
 
     # Sample inventory
     inventory = [
@@ -44,7 +47,7 @@ async def ingest_data():
                 "price_ksh": 3500000,
                 "year": 2023,
                 "mileage_km": 15000,
-                "image_url": "https://example.com/images/toyota_camry_2023.jpg",
+                "image_url": "http://localhost:8000/images/camry.png",
                 "status": "available"
             }
         },
@@ -57,7 +60,7 @@ async def ingest_data():
                 "price_ksh": 4200000,
                 "year": 2021,
                 "mileage_km": 30000,
-                "image_url": "https://example.com/images/honda_crv_2021.jpg",
+                "image_url": "http://localhost:8000/images/crv.png",
                 "status": "available"
             }
         },
@@ -70,7 +73,7 @@ async def ingest_data():
                 "price_ksh": 5800000,
                 "year": 2020,
                 "mileage_km": 45000,
-                "image_url": "https://example.com/images/bmw_330i_2020.jpg",
+                "image_url": "http://localhost:8000/images/bmw.png",
                 "status": "sold" # Should be filtered out by worker
             }
         }

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Elite Auto | Admin Dashboard</title>
+    <link rel="stylesheet" href="admin.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="admin-container">
+        <header class="admin-header">
+            <div class="header-content">
+                <h1>Elite Auto Admin</h1>
+                <p>Manage your AI inventory seamlessly</p>
+            </div>
+            <a href="/" class="back-link">Back to Chat</a>
+        </header>
+
+        <div class="dashboard-grid">
+            <!-- Add Car Form -->
+            <section class="card form-section">
+                <h2>Add New Car</h2>
+                <form id="add-car-form" enctype="multipart/form-data">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="make">Make</label>
+                            <input type="text" id="make" name="make" placeholder="e.g. Toyota" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="model">Model</label>
+                            <input type="text" id="model" name="model" placeholder="e.g. Camry" required>
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="year">Year</label>
+                            <input type="number" id="year" name="year" placeholder="e.g. 2023" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="price_ksh">Price (Ksh)</label>
+                            <input type="number" id="price_ksh" name="price_ksh" placeholder="e.g. 3500000" required>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="mileage_km">Mileage (km)</label>
+                        <input type="number" id="mileage_km" name="mileage_km" placeholder="e.g. 15000" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="listing_details">AI Listing Details (What should the AI know about this car?)</label>
+                        <textarea id="listing_details" name="listing_details" rows="4" placeholder="e.g. 2023 Toyota Camry SE. Sleek gray exterior, well-maintained..." required></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="image">Car Photo</label>
+                        <input type="file" id="image" name="image" accept="image/*" required>
+                        <div id="image-preview" class="image-preview"></div>
+                    </div>
+
+                    <button type="submit" id="submit-btn" class="submit-btn">
+                        <span>Add to Inventory</span>
+                        <div class="spinner hidden" id="loading-spinner"></div>
+                    </button>
+                    <div id="form-message" class="message hidden"></div>
+                </form>
+            </section>
+
+            <!-- Current Inventory -->
+            <section class="card inventory-section">
+                <h2>Current Inventory</h2>
+                <div id="inventory-list" class="inventory-list">
+                    <div class="loading-text">Loading inventory...</div>
+                </div>
+            </section>
+        </div>
+        
+        <!-- Leads / CRM Section -->
+        <div class="dashboard-full-width">
+            <section class="card leads-section">
+                <div class="leads-header">
+                    <h2>Test Drive Appointments (CRM)</h2>
+                    <a href="/api/admin/leads/export/csv" class="export-btn" target="_blank">Export CSV</a>
+                </div>
+                <div class="table-responsive">
+                    <table class="leads-table">
+                        <thead>
+                            <tr>
+                                <th>Date Submitted</th>
+                                <th>Customer Name</th>
+                                <th>Contact</th>
+                                <th>Car of Interest</th>
+                                <th>Preferred Time</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="leads-list">
+                            <tr><td colspan="7" class="loading-text text-center">Loading leads...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </div>
+    <script src="admin.js"></script>
+</body>
+</html>
