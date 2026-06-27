@@ -80,14 +80,23 @@ async def generate_rag_response(
     Two-Pass Conversational Routing and RAG pipeline.
     """
     # Step 1: Smart RAG - Decide if we need to search Qdrant
-    car_keywords = ["suzuki", "jimny", "toyota", "camry", "honda", "cr-v", "lexus", "bmw", "car", "suv", "sedan", "stock", "inventory", "budget", "price", "million", "ksh", "cost", "expensive", "cheapest", "buy", "sell"]
+    needs_search = True
     query_lower = message_body.lower()
     words = query_lower.split()
     
-    needs_search = True
-    if len(words) < 4:
-        if not any(kw in query_lower for kw in car_keywords):
-            needs_search = False
+    # Simple booking responses and patterns that do NOT need database search
+    booking_responses = ["yes", "no", "sure", "ok", "yep", "nah", "okay", "correct", "lets do it", "lets schedule", "cancel", "stop", "confirm"]
+    
+    import re
+    is_simple_confirmation = query_lower in booking_responses or len(words) == 1 and query_lower.strip("?.!") in booking_responses
+    is_phone = bool(re.search(r'\d{6,}', query_lower))
+    
+    # We only skip search if it's a simple confirmation/phone and doesn't mention car terms
+    car_keywords = ["suzuki", "jimny", "toyota", "camry", "honda", "cr-v", "lexus", "bmw", "car", "suv", "sedan", "stock", "inventory", "price", "ksh", "cost", "under", "below", "cheapest", "expensive", "specs", "specification", "features", "details", "mileage", "color", "year"]
+    has_car_keywords = any(kw in query_lower for kw in car_keywords)
+    
+    if (is_simple_confirmation or is_phone) and not has_car_keywords:
+        needs_search = False
 
     search_results = []
     if needs_search:
