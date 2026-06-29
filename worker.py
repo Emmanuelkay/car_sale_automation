@@ -3,7 +3,7 @@ import httpx
 from pydantic import BaseModel, Field
 from typing import Optional
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue
+from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
 import instructor
 from fastembed import TextEmbedding
 
@@ -28,6 +28,7 @@ class LeadExtraction(BaseModel):
     customer_contact: Optional[str] = Field(None, description="A valid contact phone number or WhatsApp number")
     preferred_vehicle: Optional[str] = Field(None, description="The vehicle they want to test drive")
     preferred_date_time: Optional[str] = Field(None, description="The date and time they want to schedule for a test drive")
+    customer_budget_limit: Optional[int] = Field(None, description="The maximum budget limit in Kshs if specified by the customer (e.g. 1000000 for 1 million, 4000000 for 4 million)")
     ready_for_booking: bool = Field(False, description="Set to True ONLY if the customer has explicitly agreed to a test drive AND provided their name and contact info. Otherwise False.")
 
     @field_validator("customer_contact")
@@ -62,10 +63,9 @@ CONVERSATION FLOW:
 4. Do NOT say things like "I've booked it for you" unless they have actually typed and provided their name, contact, and time in the conversation history. If any of those are missing, ask for the missing details.
 
 PRICE BUDGET FILTERING (CRITICAL):
-- Pay close attention to the customer's budget (e.g. "under 1 million", "below 3M").
-- Examine the `price_ksh` field in the metadata for each car. Perform a strict mathematical comparison: only recommend cars that are strictly within their budget.
-- If a customer asks for a car under 1 million, only the Suzuki Jimny (Ksh 250,000) is eligible. Recommending the Honda CR-V (Ksh 4,200,000) or Toyota Camry (Ksh 3,500,000) is a direct failure.
-- If no cars in the context fit their budget, state clearly that we have no cars in that budget range, and present our cheapest option as an alternative.
+- Strictly respect the customer's budget limit if specified.
+- The context inventory passed to you has already been mathematically filtered to include only vehicles within the customer's budget.
+- If no cars are shown in the Context, explain politely that we currently do not have any inventory within that budget range, and present the cheapest option available in the context as a helpful alternative.
 
 UNAVAILABLE VEHICLES & PIVOTING (CRITICAL):
 - If the customer asks for a vehicle NOT present in our inventory (e.g., Mercedes Benz GLE, Lexus, etc.) or asks about services we don't provide (like custom importing):
@@ -89,6 +89,7 @@ Fields:
 - customer_contact: A phone number, WhatsApp number, or contact info (only if explicitly provided by the user).
 - preferred_date_time: The date and time they want to schedule for a test drive (only if explicitly provided).
 - preferred_vehicle: The car they want to test drive.
+- customer_budget_limit: An integer representing the customer's maximum budget in Kshs if they mentioned a budget (e.g. 2000000 if they say "2 million" or "2M", 1000000 if they say "under 1 million", 4000000 if they say "around 4M").
 - ready_for_booking: Set to True ONLY if the customer has explicitly agreed to a test drive AND provided their name AND contact info. Otherwise, leave as False.
 
 If a detail has not been provided yet, leave it as null. Do NOT guess, assume, or hallucinate any details.
@@ -162,6 +163,7 @@ async def generate_rag_response(
     contact = None
     time_pref = None
     vehicle = None
+    budget_limit = None
     is_providing_lead_details = False
 
     try:
@@ -181,6 +183,7 @@ async def generate_rag_response(
         contact = raw_extraction.customer_contact
         time_pref = raw_extraction.preferred_date_time
         vehicle = raw_extraction.preferred_vehicle
+        budget_limit = raw_extraction.customer_budget_limit
 
         # If the LLM successfully parsed any lead details, flag it to skip RAG search
         if name or contact or time_pref or vehicle:
@@ -271,17 +274,26 @@ async def generate_rag_response(
         embeddings = list(embedding_model.embed([query_text]))
         query_vector = embeddings[0].tolist()
 
+        # Construct Qdrant filter programmatically
+        must_filters = [
+            FieldCondition(
+                key="status",
+                match=MatchValue(value="available")
+            )
+        ]
+        if budget_limit:
+            logger.info(f"Applying programmatic range filter: price <= {budget_limit}")
+            must_filters.append(
+                FieldCondition(
+                    key="metadata.price_ksh",
+                    range=Range(lte=float(budget_limit))
+                )
+            )
+
         search_results = await qdrant_client.search(
             collection_name=settings.QDRANT_COLLECTION_NAME,
             query_vector=query_vector,
-            query_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="status",
-                        match=MatchValue(value="available")
-                    )
-                ]
-            ),
+            query_filter=Filter(must=must_filters),
             limit=3
         )
 
