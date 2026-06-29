@@ -326,15 +326,34 @@ async def generate_rag_response(
         logger.error(f"Pass 2 generation error: {e}")
         ai_response_text = "I'm sorry, I encountered an error while searching the inventory. Could you please rephrase your request?"
 
-    # DYNAMIC IMAGE RESOLUTION
+    # DYNAMIC IMAGE RESOLUTION (Context-Aware Multi-Image Selector)
     selected_image_url = ""
     lower_response = ai_response_text.lower()
-    if needs_search and search_results:
+    lower_user_msg = message_body.lower()
+    combined_query = lower_user_msg + " " + lower_response
+
+    if search_results:
         for hit in search_results:
-            make = hit.payload.get("metadata", {}).get("make", "").lower()
-            model = hit.payload.get("metadata", {}).get("model", "").lower()
+            metadata = hit.payload.get("metadata", {})
+            make = metadata.get("make", "").lower()
+            model = metadata.get("model", "").lower()
             if make in lower_response or model in lower_response:
-                selected_image_url = hit.payload.get("metadata", {}).get("image_url", "")
+                images_dict = metadata.get("images", {})
+                
+                # Check message context to dynamically pick interior vs dashboard vs exterior
+                if images_dict:
+                    if any(word in combined_query for word in ["interior", "inside", "seat", "cabin", "backseat"]):
+                        selected_image_url = images_dict.get("interior", "")
+                    elif any(word in combined_query for word in ["dashboard", "cockpit", "wheel", "steering", "screen", "instrument"]):
+                        selected_image_url = images_dict.get("dashboard", "")
+                    
+                    # Fallback to exterior if no specific context matches
+                    if not selected_image_url:
+                        selected_image_url = images_dict.get("exterior", "")
+                
+                # Backwards-compatible fallback to image_url
+                if not selected_image_url:
+                    selected_image_url = metadata.get("image_url", "")
                 break
 
     # If lead was successfully saved, override with the perfect confirmation message

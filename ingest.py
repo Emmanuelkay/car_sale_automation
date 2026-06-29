@@ -48,6 +48,11 @@ async def ingest_data():
                 "year": 2023,
                 "mileage_km": 15000,
                 "image_url": "http://localhost:8000/images/camry.png",
+                "images": {
+                    "exterior": "http://localhost:8000/images/camry.png",
+                    "interior": "http://localhost:8000/images/camry_interior.png",
+                    "dashboard": "http://localhost:8000/images/camry_dashboard.png"
+                },
                 "status": "available"
             }
         },
@@ -61,6 +66,9 @@ async def ingest_data():
                 "year": 2021,
                 "mileage_km": 30000,
                 "image_url": "http://localhost:8000/images/crv.png",
+                "images": {
+                    "exterior": "http://localhost:8000/images/crv.png"
+                },
                 "status": "available"
             }
         },
