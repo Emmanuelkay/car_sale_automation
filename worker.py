@@ -73,6 +73,11 @@ UNAVAILABLE VEHICLES & PIVOTING (CRITICAL):
   2. Pivot to proposing the closest match we *do* have in stock based on the vehicle type (e.g. recommend our Honda CR-V EX-L SUV if they asked for a Mercedes GLE SUV, or recommend our Toyota Camry if they asked for a sedan).
   3. Never ignore their request or jump straight to pitching a car without first explaining that we do not have the vehicle they originally asked for.
 
+OUT-OF-DOMAIN GUARDRAIL (CRITICAL):
+- If the customer asks questions completely unrelated to cars, test drives, purchasing, or Elite Auto (e.g. asking for code, cooking recipes, general trivia, trivia questions, etc.):
+  1. Politely and humorously pivot back to cars (e.g., "While I'd love to help you cook that, I'm here to help you get behind the wheel of a premium car!").
+  2. Do NOT answer their out-of-domain request. Always steer them back to our available inventory or scheduling a test drive.
+
 Respond in plain text. Format your response using clean Markdown with bolding and structured spacing. DO NOT embed markdown image links (e.g. ![image](url)) inside the message body.
 """
 
@@ -206,13 +211,15 @@ async def generate_rag_response(
             else:
                 # Programmatically resolve vehicle of interest if LLM hallucinated it (e.g. BMW)
                 user_and_bot_history = [h.content.lower() for h in history] if history else []
+                # Check both history and the current user message to see if the vehicle was mentioned
                 combined_history_text = " ".join(user_and_bot_history)
+                full_chat_text = combined_history_text + " " + message_body.lower()
                 
                 resolved_vehicle = vehicle
-                # If the extracted vehicle is None or not in history, look it up in history
-                if not vehicle or vehicle.lower() not in combined_history_text:
+                # If the extracted vehicle is None or not in the conversation, look it up in history/current message
+                if not vehicle or vehicle.lower() not in full_chat_text:
                     for car_key in ["camry", "toyota", "jimny", "suzuki", "cr-v", "crv", "honda"]:
-                        if car_key in combined_history_text:
+                        if car_key in full_chat_text:
                             if "camry" in car_key or "toyota" in car_key:
                                 resolved_vehicle = "Toyota Camry SE"
                                 break
@@ -244,15 +251,10 @@ async def generate_rag_response(
         else:
             nudge_message = "\n\nNote: If the customer is trying to book, make sure to collect their name, phone number, and preferred date/time first."
 
-    # ==========================================
-    # Step 2: Smart RAG - Decide if we need to search Qdrant
-    # ==========================================
-    # If they are providing booking details, we NEVER run RAG search to avoid distraction
-    needs_search = True
-    if is_providing_lead_details:
+    needs_search = needs_inventory_search(message_body, history or [])
+    # If they are providing booking details and NOT asking a spec/inventory question, skip RAG search to avoid distraction
+    if is_providing_lead_details and not needs_search:
         needs_search = False
-    else:
-        needs_search = needs_inventory_search(message_body, history or [])
 
     search_results = []
     if needs_search:
