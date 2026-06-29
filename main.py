@@ -36,6 +36,23 @@ async def lifespan(app: FastAPI):
         path=settings.QDRANT_PATH
     )
     
+    # Programmatically verify and create Qdrant collection if it does not exist
+    try:
+        collections = await qdrant_client.get_collections()
+        exist = any(c.name == settings.QDRANT_COLLECTION_NAME for c in collections.collections)
+        if not exist:
+            from qdrant_client.models import Distance, VectorParams
+            await qdrant_client.create_collection(
+                collection_name=settings.QDRANT_COLLECTION_NAME,
+                vectors_config=VectorParams(
+                    size=384,  # BAAI/bge-small-en-v1.5 embedding dimension
+                    distance=Distance.COSINE
+                )
+            )
+            logger.info(f"Created Qdrant collection {settings.QDRANT_COLLECTION_NAME} programmatically.")
+    except Exception as e:
+        logger.error(f"Error checking/creating Qdrant collection: {e}")
+        
     # Initialize Async OpenAI Client with Instructor
     # We use httpx.AsyncClient with verify=False to bypass self-signed cert issues (like your curl -k)
     http_client = httpx.AsyncClient(verify=False)
@@ -101,6 +118,17 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
                         message = messages[0]
                         phone_number = message.get("from")
                         
+                        # Meta WhatsApp message deduplication check
+                        message_id = message.get("id")
+                        if message_id:
+                            from database import is_message_processed, mark_message_processed
+                            if is_message_processed(message_id):
+                                logger.info(f"Duplicate Meta webhook received (ID: {message_id}). Skipping processing.")
+                                return Response(status_code=status.HTTP_200_OK)
+                            
+                            # Mark as processed immediately
+                            mark_message_processed(message_id)
+
                         # Only handle text messages for now
                         if message.get("type") == "text":
                             message_body = message["text"]["body"]

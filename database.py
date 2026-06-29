@@ -27,6 +27,12 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS processed_messages (
+            message_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     conn.commit()
     conn.close()
 
@@ -75,3 +81,18 @@ def get_chat_history(phone_number: str, limit: int = 10):
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+def is_message_processed(message_id: str) -> bool:
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    cursor = conn.cursor()
+    cursor.execute('SELECT 1 FROM processed_messages WHERE message_id = ?', (message_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None
+
+def mark_message_processed(message_id: str):
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO processed_messages (message_id) VALUES (?)', (message_id,))
+    conn.commit()
+    conn.close()

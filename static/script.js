@@ -66,9 +66,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         
-        // Parse markdown if bot
+        // Parse markdown if bot (sanitized using DOMPurify to protect against XSS)
         if (sender === 'bot') {
-            contentDiv.innerHTML = marked.parse(text);
+            contentDiv.innerHTML = DOMPurify.sanitize(marked.parse(text));
         } else {
             contentDiv.textContent = text;
         }

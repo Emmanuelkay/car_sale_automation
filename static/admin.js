@@ -160,6 +160,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function escapeHTML(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function renderLeads(leads) {
         if (!leads || leads.length === 0) {
             leadsList.innerHTML = '<tr><td colspan="7" class="loading-text text-center">No test drives scheduled yet.</td></tr>';
@@ -173,11 +183,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const tr = document.createElement('tr');
             tr.innerHTML = `
                 <td>${date}</td>
-                <td><strong>${lead.customer_name}</strong></td>
-                <td>${lead.customer_contact}</td>
-                <td>${lead.car_of_interest}</td>
-                <td>${lead.preferred_date_time}</td>
-                <td><span class="status-badge status-new">${lead.status}</span></td>
+                <td><strong>${escapeHTML(lead.customer_name)}</strong></td>
+                <td>${escapeHTML(lead.customer_contact)}</td>
+                <td>${escapeHTML(lead.car_of_interest)}</td>
+                <td>${escapeHTML(lead.preferred_date_time)}</td>
+                <td><span class="status-badge status-new">${escapeHTML(lead.status)}</span></td>
                 <td>
                     <a href="/api/admin/leads/${lead.id}/ics" class="calendar-btn" download>📅 Add to Calendar</a>
                 </td>
