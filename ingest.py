@@ -74,7 +74,7 @@ async def ingest_data():
         },
         {
             "id": str(uuid4()),
-            "listing_details": "2020 BMW 3 Series 330i. Luxurious black sedan, sport package, premium sound system. Thrilling performance and high-end features.",
+            "listing_details": "2021 BMW 3 Series 330i. Luxurious black sedan, sport package, premium sound system. Thrilling performance and high-end features.",
             "metadata": {
                 "make": "BMW",
                 "model": "3 Series",
@@ -83,6 +83,22 @@ async def ingest_data():
                 "mileage_km": 45000,
                 "image_url": "http://localhost:8000/images/bmw.png",
                 "status": "sold" # Should be filtered out by worker
+            }
+        },
+        {
+            "id": str(uuid4()),
+            "listing_details": "2021 Suzuki Jimny. Clean, well-maintained compact off-roading SUV with leather seats, all spec, and exceptional handling capability. Highly fuel efficient.",
+            "metadata": {
+                "make": "Suzuki",
+                "model": "Jimny",
+                "price_ksh": 250000,
+                "year": 2021,
+                "mileage_km": 36500,
+                "image_url": "http://localhost:8000/images/d3edd642-63a7-40b5-9a8d-2cf6701fa3d6.jpeg",
+                "images": {
+                    "exterior": "http://localhost:8000/images/d3edd642-63a7-40b5-9a8d-2cf6701fa3d6.jpeg"
+                },
+                "status": "available"
             }
         }
     ]
