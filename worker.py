@@ -188,7 +188,17 @@ async def generate_rag_response(
             combined_user_input = " ".join(user_messages).lower()
             
             name_present = name and name.lower() in combined_user_input
-            contact_present = contact and contact.lower() in combined_user_input
+            
+            # Robust digit-only check for phone presence (e.g. comparing last 9 digits to ignore prefixes)
+            contact_present = False
+            if contact:
+                import re
+                contact_digits = re.sub(r"\D", "", contact)
+                user_digits = re.sub(r"\D", "", combined_user_input)
+                if contact_digits:
+                    core_digits = contact_digits[-9:]
+                    if core_digits in user_digits:
+                        contact_present = True
 
             if not name_present or not contact_present:
                 logger.warning(f"Pass 1 verification check failed. Hallucinated Name: {name} (Present: {name_present}), Contact: {contact} (Present: {contact_present})")
@@ -288,7 +298,8 @@ async def generate_rag_response(
 
     llm_messages = [{"role": "system", "content": custom_system_prompt}]
     if history:
-        for h in history:
+        # Prevent context drift and token overflow by limiting memory to the last 10 messages
+        for h in history[-10:]:
             role = "assistant" if h.role == "bot" else "user"
             llm_messages.append({"role": role, "content": h.content})
     llm_messages.append({"role": "user", "content": prompt})
@@ -341,6 +352,11 @@ async def generate_rag_response(
     )
 
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
 async def process_whatsapp_message(
     phone_number: str, 
     message_body: str, 
@@ -349,13 +365,34 @@ async def process_whatsapp_message(
 ):
     """
     Executes the decoupled async workflow for WhatsApp gateway delivery.
+    Persists and retrieves conversation history to support multi-turn RAG memory.
     """
     try:
         logger.info(f"--- NEW WHATSAPP MESSAGE ---")
         logger.info(f"From: {phone_number} | Message: {message_body}")
         
-        structured_response = await generate_rag_response(message_body, qdrant_client, openai_client)
+        # Save incoming user message to CRM DB
+        from database import save_chat_message, get_chat_history
+        save_chat_message(phone_number, "user", message_body)
+        
+        # Load last 10 messages of history (includes the one we just saved)
+        raw_history = get_chat_history(phone_number, limit=10)
+        # Convert to ChatMessage schema, excluding the last message (which is current message_body)
+        history_objs = [
+            ChatMessage(role=h["role"], content=h["content"]) 
+            for h in raw_history[:-1]
+        ]
+        
+        structured_response = await generate_rag_response(
+            message_body=message_body, 
+            qdrant_client=qdrant_client, 
+            openai_client=openai_client,
+            history=history_objs
+        )
 
+        # Save outgoing bot response to CRM DB
+        save_chat_message(phone_number, "bot", structured_response.message_body)
+ 
         # Step 5: Outbound Meta Gateway Delivery
         logger.info(f"--- OUTGOING WHATSAPP RESPONSE ---")
         logger.info(f"Sending to {phone_number}: {structured_response.message_body}")

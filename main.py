@@ -105,14 +105,16 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
                         if message.get("type") == "text":
                             message_body = message["text"]["body"]
                             
-                            # Enqueue processing to background tasks
-                            background_tasks.add_task(
-                                process_whatsapp_message, 
-                                phone_number, 
-                                message_body,
-                                qdrant_client,
-                                openai_client
-                            )
+                            # Only queue if the message contains text content
+                            if message_body and message_body.strip():
+                                # Enqueue processing to background tasks
+                                background_tasks.add_task(
+                                    process_whatsapp_message, 
+                                    phone_number, 
+                                    message_body,
+                                    qdrant_client,
+                                    openai_client
+                                )
                             
         # Always return 200 OK immediately
         return Response(status_code=status.HTTP_200_OK)
@@ -127,6 +129,9 @@ async def handle_web_chat(request: ChatRequest):
     """
     Endpoint for Web UI to chat with the RAG system directly.
     """
+    if not request.message or not request.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+        
     try:
         response = await generate_rag_response(request.message, qdrant_client, openai_client, history=request.history)
         return {
