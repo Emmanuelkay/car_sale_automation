@@ -216,8 +216,13 @@ async def generate_rag_response(
                 full_chat_text = combined_history_text + " " + message_body.lower()
                 
                 resolved_vehicle = vehicle
-                # If the extracted vehicle is None or not in the conversation, look it up in history/current message
-                if not vehicle or vehicle.lower() not in full_chat_text:
+                vehicle_lower = vehicle.lower() if vehicle else ""
+                
+                # Check for standard model keywords to normalize shorthand inputs
+                is_partial = vehicle_lower in ["honda", "toyota", "suzuki", "camry", "jimny", "crv", "cr-v"]
+                
+                # If the extracted vehicle is None, not in the conversation, or is a shorthand, look it up / normalize it
+                if not vehicle or vehicle_lower not in full_chat_text or is_partial:
                     for car_key in ["camry", "toyota", "jimny", "suzuki", "cr-v", "crv", "honda"]:
                         if car_key in full_chat_text:
                             if "camry" in car_key or "toyota" in car_key:
